@@ -1,0 +1,34 @@
+{
+  "diskCache": {
+    "bytesUsed": 32212254720,
+    "erroredFiles": 0,
+    "files": 1200,
+    "hashType": 4096,
+    "outOfSpace": false,
+    "path": "/home/user/.cache/rclone/vfs/onedrive",
+    "pathMeta": "/home/user/.cache/rclone/vfsMeta/onedrive",
+    "uploadsInProgress": 2,
+    "uploadsQueued": 0
+  },
+  "fs": "onedrive:",
+  "inUse": 1,
+  "metadataCache": {
+    "dirs": 150,
+    "files": 1800
+  },
+  "opt": {
+    "DirCacheTime": 86400000000000,
+    "PollInterval": 60000000000,
+    "CacheMode": 3,
+    "CacheMaxAge": 2592000000000000,
+    "CacheMaxSize": 107374182400,
+    "CacheMinFreeSpace": 10737418240,
+    "CachePollInterval": 60000000000,
+    "ChunkSize": 134217728,
+    "ReadOnly": false,
+    "UID": 1000,
+    "GID": 1000,
+    "Umask": 18,
+    "WriteBack": 5000000000
+  }
+}

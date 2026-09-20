@@ -1,0 +1,31 @@
+# Example systemd user unit for an rclone OneDrive mount with the remote
+# control API enabled, which this app reads.
+#
+# Install to ~/.config/systemd/user/rclone-onedrive.service, replacing %h
+# paths and the remote name as needed, then:
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now rclone-onedrive.service
+
+[Unit]
+Description=Rclone OneDrive mount
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/rclone mount onedrive: %h/OneDrive \
+    --config=%h/.config/rclone/rclone.conf \
+    --cache-dir=%h/.cache/rclone \
+    --vfs-cache-mode=full \
+    --vfs-cache-max-size=100G \
+    --vfs-cache-max-age=720h \
+    --vfs-cache-min-free-space=10G \
+    --dir-cache-time=24h \
+    --poll-interval=1m \
+    --rc \
+    --rc-addr=127.0.0.1:5572 \
+    --rc-no-auth
+ExecStop=/usr/bin/fusermount3 -u %h/OneDrive
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

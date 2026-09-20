@@ -1,0 +1,49 @@
+{
+  "bytes": 4294967296,
+  "checks": 0,
+  "deletedDirs": 0,
+  "deletes": 0,
+  "elapsedTime": 680.827486135,
+  "errors": 0,
+  "eta": 5340,
+  "fatalError": false,
+  "listed": 1200,
+  "renames": 0,
+  "retryError": false,
+  "serverSideCopies": 0,
+  "serverSideCopyBytes": 0,
+  "serverSideMoveBytes": 0,
+  "serverSideMoves": 0,
+  "speed": 2410832.158883027,
+  "totalBytes": 11274289152,
+  "totalChecks": 0,
+  "totalTransfers": 2,
+  "transferTime": 676.758416996,
+  "transferring": [
+    {
+      "bytes": 2147483648,
+      "dstFs": "onedrive:",
+      "eta": 5340,
+      "group": "global_stats",
+      "name": "Videos/sample-archive.iso",
+      "percentage": 25,
+      "size": 8589934592,
+      "speed": 1205020.7522299816,
+      "speedAvg": 1379997.7805857048,
+      "srcFs": ":local{8un-i}:/home/user/.cache/rclone/vfs/onedrive"
+    },
+    {
+      "bytes": 2147483648,
+      "dstFs": "onedrive:",
+      "eta": 445,
+      "group": "global_stats",
+      "name": "Documents/example-backup.tar.gz",
+      "percentage": 80,
+      "size": 2684354560,
+      "speed": 1205811.4066530452,
+      "speedAvg": 1329004.14791316,
+      "srcFs": ":local{8un-i}:/home/user/.cache/rclone/vfs/onedrive"
+    }
+  ],
+  "transfers": 0
+}
