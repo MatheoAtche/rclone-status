@@ -1,0 +1,17 @@
+# systemd user unit for the OneDrive Status tray indicator.
+# install.sh rewrites ExecStart to this checkout's launcher and installs it
+# to ~/.config/systemd/user/.
+
+[Unit]
+Description=OneDrive Status tray indicator
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/onedrive-status-tray
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

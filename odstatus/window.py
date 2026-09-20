@@ -19,6 +19,7 @@ from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
+from odstatus import service  # noqa: E402
 from odstatus.probe import (  # noqa: E402
     MOUNTPOINT,
     UNIT,
@@ -134,7 +135,7 @@ class MeterRow(Gtk.Box):
 class StatusWindow(Adw.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app, title="OneDrive Status")
-        self.set_default_size(460, 620)
+        self.set_default_size(460, 740)
         self.probe = Probe()
         self.rows: dict[str, TransferRow] = {}
 
@@ -166,6 +167,7 @@ class StatusWindow(Adw.ApplicationWindow):
         content.append(self._build_status_card())
         content.append(self._build_transfers())
         content.append(self._build_storage())
+        content.append(self._build_tray_toggle())
 
         clamp.set_child(content)
         scroller.set_child(clamp)
@@ -235,6 +237,33 @@ class StatusWindow(Adw.ApplicationWindow):
 
         group.add(listbox)
         return group
+
+    def _build_tray_toggle(self):
+        group = Adw.PreferencesGroup(title="Tray")
+        self.tray_row = Adw.SwitchRow(
+            title="Tray icon",
+            subtitle="Show in the top bar and start at login",
+        )
+        self.tray_handler = self.tray_row.connect("notify::active", self._on_tray_toggled)
+        group.add(self.tray_row)
+        return group
+
+    def _set_tray_row(self, st):
+        """Reflect unit state without the update re-triggering the handler."""
+        self.tray_row.handler_block(self.tray_handler)
+        self.tray_row.set_active(st.enabled or st.active)
+        self.tray_row.set_sensitive(st.usable)
+        self.tray_row.set_subtitle(st.detail)
+        self.tray_row.handler_unblock(self.tray_handler)
+
+    def _on_tray_toggled(self, row, _param):
+        wanted = row.get_active()
+        ok, message = service.enable() if wanted else service.disable()
+        if not ok:
+            self.banner.set_title(message or "Could not change the tray setting")
+            self.banner.set_revealed(True)
+        # Re-read rather than trusting the switch: systemd is the truth.
+        self._set_tray_row(service.state())
 
     def _install_actions(self):
         open_folder = Gio.SimpleAction.new("open-folder", None)
@@ -307,6 +336,8 @@ class StatusWindow(Adw.ApplicationWindow):
         if snap.uploads_queued:
             title = f"Transfers · {snap.uploads_queued} queued"
         self.transfers_group.set_title(title)
+
+        self._set_tray_row(service.state())
 
     def _sync_transfer_rows(self, snap):
         """Update rows in place; only add and remove what actually changed."""

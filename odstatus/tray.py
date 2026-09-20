@@ -7,6 +7,7 @@ launched as a subprocess.
 
 from __future__ import annotations
 
+import fcntl
 import os
 import pathlib
 import subprocess
@@ -20,6 +21,7 @@ from gi.repository import AppIndicator3, GLib, Gtk  # noqa: E402
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
+from odstatus import service  # noqa: E402
 from odstatus.probe import (  # noqa: E402
     MOUNTPOINT,
     UNIT,
@@ -81,6 +83,10 @@ class Tray:
 
         self.menu.append(Gtk.SeparatorMenuItem())
 
+        hide_item = Gtk.MenuItem(label="Hide Tray Icon")
+        hide_item.connect("activate", self.hide_tray)
+        self.menu.append(hide_item)
+
         quit_item = Gtk.MenuItem(label="Quit")
         quit_item.connect("activate", lambda *_: Gtk.main_quit())
         self.menu.append(quit_item)
@@ -102,6 +108,15 @@ class Tray:
             os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else ""
         )
         subprocess.Popen([sys.executable, "-m", "odstatus.window"], cwd=repo, env=env)
+
+    def hide_tray(self, *_):
+        """Turn the tray off for good, then exit under our own power.
+
+        stop=False: --now would have systemd SIGTERM us mid-call. Exiting with
+        status 0 also keeps Restart=on-failure from bringing us back.
+        """
+        service.disable(stop=False)
+        Gtk.main_quit()
 
     def refresh(self):
         snap = self.probe.poll()
@@ -138,7 +153,36 @@ class Tray:
         return GLib.SOURCE_CONTINUE
 
 
+# Held for the process lifetime; releasing it would let a second tray start.
+_LOCK_HANDLE = None
+
+
+def acquire_single_instance_lock():
+    """Take an exclusive lock, or return False if another tray holds it.
+
+    Two indicators for one mount is confusing, and the enable/disable toggle
+    makes it easy to start a second one beside a hand-launched first. flock is
+    released automatically when the process dies, however it dies, so a crash
+    cannot leave the tray permanently unstartable.
+    """
+    global _LOCK_HANDLE
+    runtime = os.environ.get("XDG_RUNTIME_DIR") or f"/tmp/odstatus-{os.getuid()}"
+    try:
+        os.makedirs(runtime, exist_ok=True)
+        handle = open(os.path.join(runtime, "onedrive-status-tray.lock"), "w")
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
+    handle.write(f"{os.getpid()}\n")
+    handle.flush()
+    _LOCK_HANDLE = handle
+    return True
+
+
 def main():
+    if not acquire_single_instance_lock():
+        print("OneDrive Status tray is already running.")
+        return 0
     Tray()
     try:
         Gtk.main()

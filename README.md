@@ -43,19 +43,42 @@ also enables the `appindicatorsupport` GNOME extension if it is installed but
 off — without it GNOME provides no `StatusNotifierWatcher`, and the tray icon
 silently never appears.
 
-Start things without logging out:
+Start the window without logging out:
 
 ```bash
-./bin/onedrive-status         # window
-./bin/onedrive-status-tray &  # tray
+./bin/onedrive-status
 ```
 
-Uninstall: delete `~/.local/share/applications/dev.matheoatche.OneDriveStatus.desktop`
-and `~/.config/autostart/onedrive-status-tray.desktop`.
+## Turning the tray on and off
+
+The tray runs as the systemd user unit `onedrive-status-tray.service`, so
+"is it running" and "does it start at login" have one authoritative answer.
+Toggle it from the **Tray icon** switch in the window, from **Hide Tray Icon**
+in the tray's own menu, or directly:
+
+```bash
+systemctl --user enable --now onedrive-status-tray.service   # on
+systemctl --user disable --now onedrive-status-tray.service  # off
+```
+
+The switch reads `is-enabled` and `is-active` rather than scanning the process
+list, and re-reads them after every toggle instead of trusting its own state.
+
+Only one tray may run at a time: it holds an `flock` in `$XDG_RUNTIME_DIR`, so
+a second launch exits quietly rather than adding a duplicate icon. The lock is
+released by the kernel when the process dies, so a crash cannot wedge it.
+
+Uninstall: delete `~/.local/share/applications/dev.matheoatche.OneDriveStatus.desktop`,
+then `systemctl --user disable --now onedrive-status-tray.service` and delete
+`~/.config/systemd/user/onedrive-status-tray.service`.
+
+Versions before this used a `~/.config/autostart` entry for the tray;
+`install.sh` removes it on upgrade so the tray cannot be started twice.
 
 ## Layout
 
     odstatus/probe.py   data layer: rc API + systemd -> Snapshot. No GUI imports.
+    odstatus/service.py tray unit lifecycle (enable/disable/state). No GUI imports.
     odstatus/window.py  GTK4 + libadwaita window.
     odstatus/tray.py    GTK3 + AppIndicator3 tray daemon.
 
