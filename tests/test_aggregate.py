@@ -52,6 +52,15 @@ class TestWorstHealth:
     def test_ordering(self, worse, better):
         assert SystemSnapshot([snap(worse), snap(better)]).worst_health is worse
 
+    @pytest.mark.parametrize("worse,better", [
+        (Health.DOWN, Health.ERROR),
+        (Health.ERROR, Health.DEGRADED),
+        (Health.DEGRADED, Health.OK),
+    ])
+    def test_ordering_reversed(self, worse, better):
+        # The worse mount still wins when it is listed second.
+        assert SystemSnapshot([snap(better), snap(worse)]).worst_health is worse
+
     def test_all_healthy_is_ok(self):
         assert SystemSnapshot([snap(), snap()]).worst_health is Health.OK
 
@@ -82,3 +91,24 @@ class TestSummary:
     def test_mentions_a_down_mount(self):
         s = SystemSnapshot([snap(Health.OK), snap(Health.DOWN, remote="b:")])
         assert "1 mount down" in s.summary
+
+    def test_all_mounts_without_stats_is_not_claimed_up_to_date(self):
+        s = SystemSnapshot([snap(stats=False), snap(stats=False, remote="b:")])
+        assert s.summary == "Stats unavailable"
+        assert "Up to date" not in s.summary
+
+    def test_some_mounts_without_stats_is_not_claimed_up_to_date(self):
+        s = SystemSnapshot([snap(stats=True), snap(stats=False, remote="b:")])
+        assert s.summary == "Up to date · 1 mount without stats"
+
+    def test_several_mounts_without_stats_is_pluralised(self):
+        s = SystemSnapshot([
+            snap(stats=True),
+            snap(stats=False, remote="b:"),
+            snap(stats=False, remote="c:"),
+        ])
+        assert "2 mounts without stats" in s.summary
+
+    def test_all_with_stats_is_still_plain_up_to_date(self):
+        s = SystemSnapshot([snap(stats=True), snap(stats=True, remote="b:")])
+        assert s.summary == "Up to date"

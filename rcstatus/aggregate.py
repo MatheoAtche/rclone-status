@@ -49,18 +49,32 @@ class SystemSnapshot:
         return sum(1 for m in self.mounts if m.health is Health.DOWN)
 
     @property
+    def without_stats_count(self) -> int:
+        return sum(1 for m in self.mounts if not m.stats_available)
+
+    @property
     def summary(self) -> str:
         if not self.mounts:
             return "No rclone mounts"
 
         parts = []
         count = self.total_transfers
+        without_stats = self.without_stats_count
         if count:
             noun = "file" if count == 1 else "files"
             parts.append(f"Uploading {count} {noun}")
             parts.append(f"{format_bytes(self.total_speed_bps)}/s")
         elif self.pending:
             parts.append("Preparing upload")
+        elif without_stats == len(self.mounts):
+            # Nothing is transferring, but nothing can confirm "up to date"
+            # either -- every mount lacks stats.
+            parts.append("Stats unavailable")
+        elif without_stats:
+            # Some mounts can confirm they are current; others cannot, so
+            # "Up to date" alone would overclaim.
+            noun = "mount" if without_stats == 1 else "mounts"
+            parts.append(f"Up to date · {without_stats} {noun} without stats")
         else:
             parts.append("Up to date")
 
