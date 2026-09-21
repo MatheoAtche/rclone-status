@@ -1,4 +1,4 @@
-"""GTK4 + libadwaita window showing OneDrive mount status.
+"""GTK4 + libadwaita window showing rclone mount status.
 
 Runs as its own process: the tray needs GTK3 via AppIndicator3, and a single
 Python process cannot load both GTK major versions.
@@ -24,6 +24,7 @@ from rcstatus.poller import MultiProbe  # noqa: E402
 from rcstatus.probe import Health, format_bytes, format_duration  # noqa: E402
 
 POLL_SECONDS = 2
+BANNER_SECONDS = 5
 
 HEALTH_PRESENTATION = {
     Health.OK: ("object-select-symbolic", "success", "Mount active"),
@@ -133,9 +134,20 @@ class MountCard(Adw.ExpanderRow):
         super().__init__()
         self.window = window
         self.rows = {}
+        # Adw.ExpanderRow parses its title/subtitle as Pango markup by
+        # default, so a remote or mountpoint containing "&" renders blank
+        # and logs a Gtk-WARNING on every refresh. Neither is markup.
+        self.set_use_markup(False)
 
         self.icon = Gtk.Image(icon_name="object-select-symbolic", pixel_size=16)
         self.add_prefix(self.icon)
+
+        self.error_label = Gtk.Label(xalign=0, wrap=True, visible=False)
+        self.error_label.set_use_markup(False)
+        self.error_label.add_css_class("error")
+        self.error_label.set_margin_top(6)
+        self.error_label.set_margin_start(12)
+        self.error_label.set_margin_end(12)
 
         self.transfers_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
         self.transfers_list.add_css_class("boxed-list")
@@ -152,6 +164,7 @@ class MountCard(Adw.ExpanderRow):
         body.set_margin_bottom(12)
         body.set_margin_start(12)
         body.set_margin_end(12)
+        body.append(self.error_label)
         body.append(self.stack)
 
         self.cache_meter = MeterRow("Local cache")
@@ -180,8 +193,7 @@ class MountCard(Adw.ExpanderRow):
     def _restart(self, *_):
         if self._unit and self._user_unit:
             subprocess.Popen(["systemctl", "--user", "restart", self._unit])
-            self.window.banner.set_title("Restarting the mount…")
-            self.window.banner.set_revealed(True)
+            self.window.show_banner("Restarting the mount…")
 
     def update(self, snap):
         mount = snap.mount
@@ -203,6 +215,12 @@ class MountCard(Adw.ExpanderRow):
         # A mount may legitimately offer no restart: only user units can be
         # restarted without privilege we do not have.
         self.restart_button.set_visible(mount.can_restart)
+
+        if snap.last_error:
+            self.error_label.set_text(snap.last_error)
+            self.error_label.set_visible(True)
+        else:
+            self.error_label.set_visible(False)
 
         self._sync_transfers(snap)
         self.cache_meter.update(
@@ -228,6 +246,15 @@ class MountCard(Adw.ExpanderRow):
         for path in list(self.rows):
             if path not in seen:
                 self.transfers_list.remove(self.rows.pop(path))
+
+        # "No transfers in progress" implies stats were checked and came up
+        # empty -- true only when stats are actually available and mounted.
+        if snap.health is Health.DOWN:
+            self.empty_label.set_text("Not mounted")
+        elif not snap.stats_available:
+            self.empty_label.set_text("No stats available")
+        else:
+            self.empty_label.set_text("No transfers in progress")
         self.stack.set_visible_child_name("list" if self.rows else "empty")
 
 
@@ -304,10 +331,24 @@ class StatusWindow(Adw.ApplicationWindow):
         wanted = row.get_active()
         ok, message = service.enable() if wanted else service.disable()
         if not ok:
-            self.banner.set_title(message or "Could not change the tray setting")
-            self.banner.set_revealed(True)
+            self.show_banner(message or "Could not change the tray setting")
         # Re-read rather than trusting the switch: systemd is the truth.
         self._set_tray_row(service.state())
+
+    def show_banner(self, title):
+        """Reveal the banner, then hide it on its own after a few seconds.
+
+        Neither trigger (a restart request, a tray-toggle failure) is a
+        state the app keeps tracking, so there is nothing to watch for
+        "clearing" on the next refresh -- a plain timeout is simplest.
+        """
+        self.banner.set_title(title)
+        self.banner.set_revealed(True)
+        GLib.timeout_add_seconds(BANNER_SECONDS, self._hide_banner)
+
+    def _hide_banner(self):
+        self.banner.set_revealed(False)
+        return GLib.SOURCE_REMOVE
 
     def _install_css(self):
         provider = Gtk.CssProvider()

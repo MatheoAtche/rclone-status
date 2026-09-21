@@ -1,4 +1,4 @@
-"""Tray indicator for the OneDrive mount.
+"""Tray indicator for rclone mounts.
 
 GTK3-only by necessity: AppIndicator3 links against GTK3, which cannot be
 loaded alongside the window's GTK4 in one process. The window is therefore
@@ -35,6 +35,9 @@ ICONS = {
     Health.DOWN: "network-offline-symbolic",
 }
 UPLOADING_ICON = "network-transmit-symbolic"
+# Zero mounts is not "all healthy" -- there is nothing to be healthy about,
+# so it gets its own neutral icon rather than the OK checkmark.
+NO_MOUNTS_ICON = "folder-remote-symbolic"
 
 
 class Tray:
@@ -102,9 +105,12 @@ class Tray:
     def refresh(self):
         system = self.prober.poll()
 
-        icon = ICONS[system.worst_health]
-        if system.worst_health is Health.OK and system.total_transfers:
-            icon = UPLOADING_ICON
+        if not system.mounts:
+            icon = NO_MOUNTS_ICON
+        else:
+            icon = ICONS[system.worst_health]
+            if system.worst_health is Health.OK and system.total_transfers:
+                icon = UPLOADING_ICON
         self.indicator.set_icon_full(icon, system.summary)
 
         # The label sits next to the icon in the top bar; keep it short and
@@ -152,7 +158,7 @@ _LOCK_HANDLE = None
 def acquire_single_instance_lock():
     """Take an exclusive lock, or return False if another tray holds it.
 
-    Two indicators for one mount is confusing, and the enable/disable toggle
+    Two indicators for one machine is confusing, and the enable/disable toggle
     makes it easy to start a second one beside a hand-launched first. flock is
     released automatically when the process dies, however it dies, so a crash
     cannot leave the tray permanently unstartable.
