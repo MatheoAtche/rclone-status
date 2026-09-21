@@ -1,0 +1,37 @@
+# Example systemd user unit for an rclone mount with the remote control API
+# enabled, which this app reads. Rclone Status discovers mounts by scanning
+# /proc, so no per-mount configuration is needed on the app's side -- this
+# unit only needs to start rclone with --rc.
+#
+# Copy to ~/.config/systemd/user/rclone-mount@REMOTE.service (or any unit
+# name you like), replacing REMOTE and MOUNTPOINT below, then:
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now rclone-mount@REMOTE.service
+#
+# Running more than one mount? Give each unit its own --rc-addr port --
+# discovery reads whatever port each mount's own process was started with,
+# so they do not need to agree on one.
+
+[Unit]
+Description=Rclone mount
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/rclone mount REMOTE: %h/MOUNTPOINT \
+    --config=%h/.config/rclone/rclone.conf \
+    --cache-dir=%h/.cache/rclone \
+    --vfs-cache-mode=full \
+    --vfs-cache-max-size=100G \
+    --vfs-cache-max-age=720h \
+    --vfs-cache-min-free-space=10G \
+    --dir-cache-time=24h \
+    --poll-interval=1m \
+    --rc \
+    --rc-addr=127.0.0.1:5572 \
+    --rc-no-auth
+ExecStop=/usr/bin/fusermount3 -u %h/MOUNTPOINT
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
