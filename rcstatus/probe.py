@@ -1,9 +1,9 @@
-"""Reads OneDrive mount state from rclone's rc API and systemd.
+"""Reads an rclone mount's state from its rc API and systemd.
 
 Pure data layer: no GUI imports, so both the GTK3 tray and the GTK4 window
-can share it. Every public entry point degrades to a usable Snapshot rather
-than raising -- "the mount is down" is precisely the state worth displaying,
-so a failed poll must never crash a caller.
+can share it. Every public entry point degrades to a usable MountSnapshot
+rather than raising -- "the mount is down" is precisely the state worth
+displaying, so a failed poll must never crash a caller.
 """
 
 from __future__ import annotations
@@ -17,10 +17,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 
-RC_ADDR = os.environ.get("RCSTATUS_RC_ADDR", "127.0.0.1:5572")
-UNIT = os.environ.get("RCSTATUS_UNIT", "rclone-onedrive.service")
-MOUNTPOINT = os.environ.get("RCSTATUS_MOUNT", os.path.expanduser("~/OneDrive"))
-REMOTE = os.environ.get("RCSTATUS_REMOTE", "onedrive:")
+from rcstatus.discovery import Mount
 
 # The rc API is loopback-only and started with --rc-no-auth, so a short
 # timeout is enough; anything slower means the mount is wedged.
@@ -86,10 +83,12 @@ class Transfer:
 
 
 @dataclass
-class Snapshot:
-    """Everything the UIs render, captured at one instant."""
+class MountSnapshot:
+    """Everything the UIs render for one mount, captured at one instant."""
 
     health: Health
+    mount: Mount | None = None
+    stats_available: bool = False
     transfers: list[Transfer] = field(default_factory=list)
     uploads_in_progress: int = 0
     uploads_queued: int = 0
@@ -102,7 +101,6 @@ class Snapshot:
     quota_total: int | None = None
     uptime_seconds: int | None = None
     mounted: bool = False
-    unit_active: bool = False
     taken_at: float = field(default_factory=time.time)
 
     @property
@@ -133,9 +131,11 @@ class Snapshot:
     @property
     def summary(self) -> str:
         if self.health is Health.DOWN:
-            return "Mount is not running"
-        if self.health is Health.DEGRADED:
-            return "Mount running, status unavailable"
+            return "Not mounted"
+        if not self.stats_available:
+            if self.mount and not self.mount.has_stats:
+                return "Mounted · no stats (add --rc)"
+            return "Mounted · stats unavailable"
         parts = []
         if self.transfers:
             noun = "file" if len(self.transfers) == 1 else "files"
@@ -153,8 +153,13 @@ class Snapshot:
         return " · ".join(parts)
 
 
-def build_snapshot(core, vfs, about, unit_active, uptime_seconds, mounted) -> Snapshot:
-    """Assemble a Snapshot from raw payloads. Any of them may be None."""
+def build_snapshot(mount, core, vfs, about, mounted, uptime_seconds) -> MountSnapshot:
+    """Assemble a MountSnapshot. core/vfs/about may each be None."""
+    # Capture this BEFORE the coercion below: once `core` is {} there is no way
+    # to tell "the rc API could not be reached" from "the rc API answered with
+    # an empty object". Only the first is a fault.
+    stats_available = core is not None
+
     core = core or {}
     vfs = vfs or {}
     disk = vfs.get("diskCache") or {}
@@ -177,12 +182,12 @@ def build_snapshot(core, vfs, about, unit_active, uptime_seconds, mounted) -> Sn
     out_of_space = bool(disk.get("outOfSpace"))
     errored_files = int(disk.get("erroredFiles") or 0)
 
-    if not unit_active or not mounted:
-        # A live unit with a vanished FUSE mount is still unusable.
+    if not mounted:
         health = Health.DOWN
-    elif core is None or not core:
-        # Mounted but the rc API gave us nothing: running, status unknown.
-        health = Health.DEGRADED
+    elif not stats_available:
+        # No --rc is a configuration choice and stays healthy; a configured
+        # port that will not answer is a fault.
+        health = Health.DEGRADED if mount.has_stats else Health.OK
     elif errors or out_of_space or errored_files:
         health = Health.ERROR
     else:
@@ -197,8 +202,10 @@ def build_snapshot(core, vfs, about, unit_active, uptime_seconds, mounted) -> Sn
     if cache_max is None:
         cache_max = (vfs.get("opt") or {}).get("CacheMaxSize")
 
-    return Snapshot(
+    return MountSnapshot(
         health=health,
+        mount=mount,
+        stats_available=stats_available,
         transfers=transfers,
         uploads_in_progress=int(disk.get("uploadsInProgress") or 0),
         uploads_queued=int(disk.get("uploadsQueued") or 0),
@@ -211,15 +218,16 @@ def build_snapshot(core, vfs, about, unit_active, uptime_seconds, mounted) -> Sn
         quota_total=quota_total,
         uptime_seconds=uptime_seconds,
         mounted=mounted,
-        unit_active=unit_active,
     )
 
 
-def _rc(endpoint: str, payload: dict | None = None):
-    """POST to the rclone rc API; return parsed JSON or None if unreachable."""
+def _rc(rc_addr, endpoint: str, payload: dict | None = None):
+    """POST to a mount's rc API; return parsed JSON or None if unreachable."""
+    if not rc_addr:
+        return None
     body = json.dumps(payload or {}).encode()
     req = urllib.request.Request(
-        f"http://{RC_ADDR}/{endpoint}",
+        f"http://{rc_addr}/{endpoint}",
         data=body,
         headers={"Content-Type": "application/json"},
         method="POST",
@@ -231,56 +239,59 @@ def _rc(endpoint: str, payload: dict | None = None):
         return None
 
 
-def _systemd_state() -> tuple[bool, int | None]:
-    """Return (unit_active, uptime_seconds)."""
+def _unit_uptime(unit, user_unit) -> int | None:
+    """Seconds since the owning unit started, or None."""
+    if not unit:
+        return None
+    scope = "--user" if user_unit else "--system"
     try:
         out = subprocess.run(
-            ["systemctl", "--user", "show", UNIT,
+            ["systemctl", scope, "show", unit,
              "--property=ActiveState", "--property=ActiveEnterTimestampMonotonic"],
             capture_output=True, text=True, timeout=3,
         ).stdout
     except (OSError, subprocess.SubprocessError):
-        return False, None
+        return None
 
-    props = dict(
-        line.split("=", 1) for line in out.strip().splitlines() if "=" in line
-    )
-    active = props.get("ActiveState") == "active"
-
-    uptime = None
+    props = dict(l.split("=", 1) for l in out.strip().splitlines() if "=" in l)
+    if props.get("ActiveState") != "active":
+        return None
     started = props.get("ActiveEnterTimestampMonotonic")
-    if active and started and started.isdigit() and int(started) > 0:
-        # CLOCK_MONOTONIC microseconds, matching the kernel's own clock.
-        uptime = max(0, int(time.clock_gettime(time.CLOCK_MONOTONIC) - int(started) / 1e6))
-    return active, uptime
+    if not (started and started.isdigit() and int(started) > 0):
+        return None
+    # CLOCK_MONOTONIC microseconds, matching the kernel's own clock.
+    return max(0, int(time.clock_gettime(time.CLOCK_MONOTONIC) - int(started) / 1e6))
 
 
 class Probe:
-    """Polls the mount, caching the expensive quota call."""
+    """Polls one mount, caching that mount's expensive quota call."""
 
-    def __init__(self):
+    def __init__(self, mount: Mount):
+        self.mount = mount
         self._quota = None
         self._quota_at = 0.0
 
     def _quota_now(self):
         age = time.time() - self._quota_at
         if self._quota is None or age > QUOTA_TTL:
-            fresh = _rc("operations/about", {"fs": REMOTE})
+            fresh = _rc(self.mount.rc_addr, "operations/about",
+                        {"fs": self.mount.remote})
             if fresh is not None:
                 self._quota = fresh
                 self._quota_at = time.time()
         return self._quota
 
-    def poll(self) -> Snapshot:
-        unit_active, uptime = _systemd_state()
-        mounted = os.path.ismount(MOUNTPOINT)
+    def poll(self) -> MountSnapshot:
+        mount = self.mount
+        mounted = os.path.ismount(mount.mountpoint)
+        uptime = _unit_uptime(mount.unit, mount.user_unit)
 
-        if not unit_active or not mounted:
-            # Drop the cached quota so a restart doesn't show stale figures.
+        if not mounted:
+            # Drop the cached quota so a restart cannot show stale figures.
             self._quota = None
-            return build_snapshot(None, None, None, unit_active, uptime, mounted)
+            return build_snapshot(mount, None, None, None, mounted, uptime)
 
-        core = _rc("core/stats")
-        vfs = _rc("vfs/stats")
+        core = _rc(mount.rc_addr, "core/stats")
+        vfs = _rc(mount.rc_addr, "vfs/stats")
         about = self._quota_now() if core is not None else None
-        return build_snapshot(core, vfs, about, unit_active, uptime, mounted)
+        return build_snapshot(mount, core, vfs, about, mounted, uptime)

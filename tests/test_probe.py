@@ -8,9 +8,10 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
+from rcstatus.discovery import Mount
 from rcstatus.probe import (
     Health,
-    Snapshot,
+    MountSnapshot,
     Transfer,
     build_snapshot,
     format_bytes,
@@ -24,27 +25,33 @@ def load(name):
     return json.loads((FIXTURES / f"{name}.json").read_text())
 
 
+MOUNT = Mount("onedrive:", "/home/user/OneDrive", pid=1, rc_addr="127.0.0.1:5572",
+              unit="rclone-onedrive.service", user_unit=True)
+NO_RC_MOUNT = Mount("backup:", "/home/user/Backup", pid=2, rc_addr=None,
+                     unit=None, user_unit=False)
+
+
 @pytest.fixture
 def uploading():
     return build_snapshot(
+        MOUNT,
         core=load("core_stats_uploading"),
         vfs=load("vfs_stats_uploading"),
         about=load("about"),
-        unit_active=True,
-        uptime_seconds=680,
         mounted=True,
+        uptime_seconds=680,
     )
 
 
 @pytest.fixture
 def idle():
     return build_snapshot(
+        MOUNT,
         core=load("core_stats_idle"),
         vfs=load("vfs_stats_idle"),
         about=load("about"),
-        unit_active=True,
-        uptime_seconds=680,
         mounted=True,
+        uptime_seconds=680,
     )
 
 
@@ -87,39 +94,18 @@ class TestTransfers:
 
 
 class TestHealth:
-    def test_healthy_when_unit_active_and_mounted(self, uploading):
+    """stats_available and health answer different questions."""
+
+    def test_reachable_and_clean_is_ok_with_stats(self, uploading):
         assert uploading.health is Health.OK
+        assert uploading.stats_available is True
 
-    def test_unit_dead_is_down(self):
-        snap = build_snapshot(
-            core=None, vfs=None, about=None,
-            unit_active=False, uptime_seconds=None, mounted=False,
-        )
-        assert snap.health is Health.DOWN
-
-    def test_unit_active_but_not_mounted_is_down(self):
-        # The FUSE mount can vanish while systemd still considers the unit up.
-        snap = build_snapshot(
-            core=load("core_stats_idle"), vfs=load("vfs_stats_idle"), about=None,
-            unit_active=True, uptime_seconds=5, mounted=False,
-        )
-        assert snap.health is Health.DOWN
-
-    def test_unreachable_rc_api_while_mounted_is_degraded(self):
-        snap = build_snapshot(
-            core=None, vfs=None, about=None,
-            unit_active=True, uptime_seconds=5, mounted=True,
-        )
-        assert snap.health is Health.DEGRADED
-
-    def test_transfer_errors_surface_as_error_state(self):
+    def test_errors_are_an_error_state(self):
         core = load("core_stats_idle")
         core["errors"] = 3
         core["lastError"] = "quota exceeded"
-        snap = build_snapshot(
-            core=core, vfs=load("vfs_stats_idle"), about=load("about"),
-            unit_active=True, uptime_seconds=5, mounted=True,
-        )
+        snap = build_snapshot(MOUNT, core=core, vfs=load("vfs_stats_idle"),
+                               about=load("about"), mounted=True, uptime_seconds=5)
         assert snap.health is Health.ERROR
         assert snap.errors == 3
         assert snap.last_error == "quota exceeded"
@@ -127,19 +113,63 @@ class TestHealth:
     def test_cache_out_of_space_is_an_error(self):
         vfs = load("vfs_stats_idle")
         vfs["diskCache"]["outOfSpace"] = True
-        snap = build_snapshot(
-            core=load("core_stats_idle"), vfs=vfs, about=load("about"),
-            unit_active=True, uptime_seconds=5, mounted=True,
-        )
+        snap = build_snapshot(MOUNT, core=load("core_stats_idle"), vfs=vfs,
+                               about=load("about"), mounted=True, uptime_seconds=5)
         assert snap.health is Health.ERROR
 
+    def test_no_rc_configured_is_healthy_without_stats(self):
+        # A deliberate choice, not a fault: must not warn forever.
+        snap = build_snapshot(NO_RC_MOUNT, core=None, vfs=None, about=None,
+                               mounted=True, uptime_seconds=None)
+        assert snap.health is Health.OK
+        assert snap.stats_available is False
+
+    def test_configured_rc_that_is_unreachable_is_degraded(self):
+        snap = build_snapshot(MOUNT, core=None, vfs=None, about=None,
+                               mounted=True, uptime_seconds=None)
+        assert snap.health is Health.DEGRADED
+        assert snap.stats_available is False
+
+    def test_rc_answering_with_an_empty_object_is_ok_with_stats(self):
+        # An empty {} means the rc API DID answer -- distinct from None, which
+        # means it could not be reached at all. Only the latter is a fault.
+        snap = build_snapshot(MOUNT, core={}, vfs={}, about=None,
+                               mounted=True, uptime_seconds=None)
+        assert snap.stats_available is True
+        assert snap.health is Health.OK
+
+    def test_rc_configured_but_unreachable_has_no_stats_and_is_degraded(self):
+        snap = build_snapshot(MOUNT, core=None, vfs=None, about=None,
+                               mounted=True, uptime_seconds=None)
+        assert snap.stats_available is False
+        assert snap.health is Health.DEGRADED
+
+    def test_unmounted_is_down(self):
+        snap = build_snapshot(MOUNT, core=None, vfs=None, about=None,
+                               mounted=False, uptime_seconds=None)
+        assert snap.health is Health.DOWN
+        assert snap.stats_available is False
+
+    def test_unmounted_beats_a_missing_rc(self):
+        snap = build_snapshot(NO_RC_MOUNT, core=None, vfs=None, about=None,
+                               mounted=False, uptime_seconds=None)
+        assert snap.health is Health.DOWN
+
     def test_never_raises_on_empty_payloads(self):
-        snap = build_snapshot(
-            core={}, vfs={}, about={},
-            unit_active=True, uptime_seconds=None, mounted=True,
-        )
-        assert isinstance(snap, Snapshot)
+        snap = build_snapshot(MOUNT, core={}, vfs={}, about={},
+                               mounted=True, uptime_seconds=None)
+        assert isinstance(snap, MountSnapshot)
         assert snap.transfers == []
+
+    def test_snapshot_carries_its_mount(self, uploading):
+        assert uploading.mount.remote == "onedrive:"
+
+
+class TestNoRcSummary:
+    def test_summary_names_the_missing_flag(self):
+        snap = build_snapshot(NO_RC_MOUNT, core=None, vfs=None, about=None,
+                               mounted=True, uptime_seconds=None)
+        assert "--rc" in snap.summary
 
 
 class TestQueue:
@@ -172,8 +202,8 @@ class TestCacheAndQuota:
 
     def test_missing_quota_is_none_not_zero(self, idle):
         snap = build_snapshot(
-            core=load("core_stats_idle"), vfs=load("vfs_stats_idle"), about=None,
-            unit_active=True, uptime_seconds=5, mounted=True,
+            MOUNT, core=load("core_stats_idle"), vfs=load("vfs_stats_idle"), about=None,
+            mounted=True, uptime_seconds=5,
         )
         # None means "not yet polled"; zero would wrongly render an empty bar.
         assert snap.quota_used is None
@@ -236,16 +266,16 @@ class TestSummaryLine:
 
     def test_summarises_down(self):
         snap = build_snapshot(
-            core=None, vfs=None, about=None,
-            unit_active=False, uptime_seconds=None, mounted=False,
+            MOUNT, core=None, vfs=None, about=None,
+            mounted=False, uptime_seconds=None,
         )
-        assert snap.summary == "Mount is not running"
+        assert snap.summary == "Not mounted"
 
     def test_mentions_queue_when_files_are_waiting(self):
         vfs = load("vfs_stats_uploading")
         vfs["diskCache"]["uploadsQueued"] = 4
         snap = build_snapshot(
-            core=load("core_stats_uploading"), vfs=vfs, about=load("about"),
-            unit_active=True, uptime_seconds=5, mounted=True,
+            MOUNT, core=load("core_stats_uploading"), vfs=vfs, about=load("about"),
+            mounted=True, uptime_seconds=5,
         )
         assert "4 queued" in snap.summary
