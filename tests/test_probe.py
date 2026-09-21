@@ -260,7 +260,7 @@ class TestFormatting:
         (1048576, "1.0 MB"),
         (607727616, "579.6 MB"),
         (8471603200, "7.9 GB"),
-        (1104880336896, "1.0 TB"),
+        (1099511627776, "1.0 TB"),
     ])
     def test_format_bytes(self, value, expected):
         assert format_bytes(value) == expected
