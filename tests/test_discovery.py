@@ -3,6 +3,8 @@
 import pathlib
 import sys
 
+import pytest
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from rcstatus.discovery import (
@@ -24,16 +26,25 @@ NO_UNIT_CGROUP = "0::/user.slice/user-1000.slice/session-2.scope\n"
 
 
 def make_proc(tmp_path, mounts_text, processes):
-    """Build a fake /proc. processes maps pid -> (comm, argv, cgroup)."""
+    """Build a fake /proc. processes maps pid -> (comm, argv, cgroup[, cwd]).
+
+    cwd, if given, becomes a `cwd` symlink under the fake pid directory, so
+    discovery can resolve a relative mountpoint the same way it would read
+    /proc/<pid>/cwd on a real system.
+    """
     root = tmp_path / "proc"
     root.mkdir()
     (root / "mounts").write_text(mounts_text)
-    for pid, (comm, argv, cgroup) in processes.items():
+    for pid, spec in processes.items():
+        comm, argv, cgroup = spec[:3]
+        cwd = spec[3] if len(spec) > 3 else None
         d = root / str(pid)
         d.mkdir()
         (d / "comm").write_text(comm + "\n")
         (d / "cmdline").write_bytes("\0".join(argv).encode() + b"\0")
         (d / "cgroup").write_text(cgroup)
+        if cwd is not None:
+            (d / "cwd").symlink_to(cwd)
     return str(root)
 
 
@@ -85,12 +96,31 @@ class TestRcAddrFromArgv:
         assert rc_addr_from_argv(["rclone", "mount", "x:", "/m"]) is None
 
     def test_supports_space_separated_form(self):
-        argv = ["rclone", "mount", "x:", "/m", "--rc-addr", "127.0.0.1:5590"]
+        argv = ["rclone", "mount", "x:", "/m", "--rc", "--rc-addr", "127.0.0.1:5590"]
         assert rc_addr_from_argv(argv) == "127.0.0.1:5590"
 
     def test_rc_addr_as_final_element_is_safe(self):
         # --rc-addr as the final element with no value should not raise.
-        argv = ["rclone", "mount", "x:", "/m", "--rc-addr"]
+        argv = ["rclone", "mount", "x:", "/m", "--rc", "--rc-addr"]
+        assert rc_addr_from_argv(argv) is None
+
+    def test_rc_addr_without_rc_is_no_stats(self):
+        # Only --rc starts rclone's rc server; --rc-addr alone binds nothing.
+        argv = ["rclone", "mount", "x:", "/m", "--rc-addr=127.0.0.1:5572"]
+        assert rc_addr_from_argv(argv) is None
+
+    @pytest.mark.parametrize("raw,expected", [
+        (":5572", "127.0.0.1:5572"),
+        ("0.0.0.0:5572", "127.0.0.1:5572"),
+        ("[::]:5572", "127.0.0.1:5572"),
+    ])
+    def test_wildcard_hosts_map_to_loopback(self, raw, expected):
+        argv = ["rclone", "mount", "x:", "/m", "--rc", f"--rc-addr={raw}"]
+        assert rc_addr_from_argv(argv) == expected
+
+    def test_unix_socket_rc_addr_is_out_of_scope(self):
+        argv = ["rclone", "mount", "x:", "/m", "--rc",
+                "--rc-addr=unix:///run/user/1000/rclone.sock"]
         assert rc_addr_from_argv(argv) is None
 
 
@@ -148,15 +178,18 @@ class TestDiscover:
         assert m.user_unit is True
 
     def test_finds_several_mounts_with_different_ports(self, tmp_path):
+        # --rc-addr alone starts nothing; --rc is what turns on the rc server
+        # (F2), so both processes need it for this to exercise multi-port
+        # discovery rather than the "no --rc" path.
         proc = make_proc(
             tmp_path,
             "onedrive: /home/u/OneDrive fuse.rclone rw 0 0\n"
             "gdrive: /home/u/Drive fuse.rclone rw 0 0\n",
             {
                 10: ("rclone", ["rclone", "mount", "onedrive:", "/home/u/OneDrive",
-                                "--rc-addr=127.0.0.1:5572"], USER_CGROUP),
+                                "--rc", "--rc-addr=127.0.0.1:5572"], USER_CGROUP),
                 11: ("rclone", ["rclone", "mount", "gdrive:", "/home/u/Drive",
-                                "--rc-addr=127.0.0.1:5580"], USER_CGROUP),
+                                "--rc", "--rc-addr=127.0.0.1:5580"], USER_CGROUP),
             },
         )
         found = {m.remote: m for m in discover(proc)}
@@ -260,9 +293,10 @@ class TestDiscover:
             "gdrive: /home/u/Drive fuse.rclone rw 0 0\n",
             {
                 100: ("rclone", ["rclone", "mount", "onedrive:", "/home/u/OneDrive",
-                                 "--rc-addr=127.0.0.1:5599"], USER_CGROUP),
+                                 "--rc", "--rc-addr=127.0.0.1:5599"], USER_CGROUP),
                 200: ("rclone", ["rclone", "mount", "gdrive:", "/home/u/Drive",
-                                 "--cache-dir", "/home/u/OneDrive", "--rc-addr=127.0.0.1:5572"],
+                                 "--cache-dir", "/home/u/OneDrive", "--rc",
+                                 "--rc-addr=127.0.0.1:5572"],
                       USER_CGROUP),
             },
         )
@@ -296,6 +330,54 @@ class TestDiscover:
         )
         [m] = discover(proc)
         assert m.pid == 40
+
+    def test_flag_before_the_subcommand_is_skipped(self, tmp_path):
+        # -v is a boolean flag with no value; the subcommand still follows it.
+        proc = make_proc(
+            tmp_path,
+            "od: /home/u/OD fuse.rclone rw 0 0\n",
+            {50: ("rclone", ["rclone", "-v", "mount", "od:", "/home/u/OD", "--rc"],
+                  USER_CGROUP)},
+        )
+        [m] = discover(proc)
+        assert m.pid == 50
+        assert m.rc_addr == DEFAULT_RC_ADDR
+
+    def test_value_taking_flag_before_the_subcommand_is_skipped(self, tmp_path):
+        # --config takes a separate value; that value must not be mistaken
+        # for the subcommand.
+        proc = make_proc(
+            tmp_path,
+            "od: /home/u/OD fuse.rclone rw 0 0\n",
+            {51: ("rclone", ["rclone", "--config", "/etc/rclone.conf", "mount",
+                             "od:", "/home/u/OD", "--rc"], USER_CGROUP)},
+        )
+        [m] = discover(proc)
+        assert m.pid == 51
+
+    def test_mountpoint_with_a_trailing_slash_still_matches(self, tmp_path):
+        # /proc/mounts reports the canonical path; argv may carry a trailing
+        # slash. Compare after normpath, not as raw strings.
+        proc = make_proc(
+            tmp_path,
+            "od: /home/u/OD fuse.rclone rw 0 0\n",
+            {52: ("rclone", ["rclone", "mount", "od:", "/home/u/OD/", "--rc"],
+                  USER_CGROUP)},
+        )
+        [m] = discover(proc)
+        assert m.pid == 52
+
+    def test_relative_mountpoint_resolves_against_process_cwd(self, tmp_path):
+        # A mount started with a relative mountpoint argument is resolved
+        # against /proc/<pid>/cwd, not matched as a literal relative string.
+        proc = make_proc(
+            tmp_path,
+            "od: /home/u/OD fuse.rclone rw 0 0\n",
+            {53: ("rclone", ["rclone", "mount", "od:", "OD", "--rc"],
+                  USER_CGROUP, "/home/u")},
+        )
+        [m] = discover(proc)
+        assert m.pid == 53
 
 
 class TestMountIdentity:
