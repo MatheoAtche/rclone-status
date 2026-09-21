@@ -1,4 +1,5 @@
-"""Tests for the probe layer, driven by fixtures recorded from a live mount."""
+"""Tests for the probe layer, driven by synthetic fixtures shaped like real
+rc API responses."""
 
 import json
 import pathlib
@@ -8,10 +9,12 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
+import rcstatus.probe as probe
 from rcstatus.discovery import Mount
 from rcstatus.probe import (
     Health,
     MountSnapshot,
+    Probe,
     Transfer,
     build_snapshot,
     format_bytes,
@@ -39,7 +42,6 @@ def uploading():
         vfs=load("vfs_stats_uploading"),
         about=load("about"),
         mounted=True,
-        uptime_seconds=680,
     )
 
 
@@ -51,7 +53,6 @@ def idle():
         vfs=load("vfs_stats_idle"),
         about=load("about"),
         mounted=True,
-        uptime_seconds=680,
     )
 
 
@@ -105,7 +106,7 @@ class TestHealth:
         core["errors"] = 3
         core["lastError"] = "quota exceeded"
         snap = build_snapshot(MOUNT, core=core, vfs=load("vfs_stats_idle"),
-                               about=load("about"), mounted=True, uptime_seconds=5)
+                               about=load("about"), mounted=True)
         assert snap.health is Health.ERROR
         assert snap.errors == 3
         assert snap.last_error == "quota exceeded"
@@ -114,19 +115,19 @@ class TestHealth:
         vfs = load("vfs_stats_idle")
         vfs["diskCache"]["outOfSpace"] = True
         snap = build_snapshot(MOUNT, core=load("core_stats_idle"), vfs=vfs,
-                               about=load("about"), mounted=True, uptime_seconds=5)
+                               about=load("about"), mounted=True)
         assert snap.health is Health.ERROR
 
     def test_no_rc_configured_is_healthy_without_stats(self):
         # A deliberate choice, not a fault: must not warn forever.
         snap = build_snapshot(NO_RC_MOUNT, core=None, vfs=None, about=None,
-                               mounted=True, uptime_seconds=None)
+                               mounted=True)
         assert snap.health is Health.OK
         assert snap.stats_available is False
 
     def test_configured_rc_that_is_unreachable_is_degraded(self):
         snap = build_snapshot(MOUNT, core=None, vfs=None, about=None,
-                               mounted=True, uptime_seconds=None)
+                               mounted=True)
         assert snap.health is Health.DEGRADED
         assert snap.stats_available is False
 
@@ -134,30 +135,24 @@ class TestHealth:
         # An empty {} means the rc API DID answer -- distinct from None, which
         # means it could not be reached at all. Only the latter is a fault.
         snap = build_snapshot(MOUNT, core={}, vfs={}, about=None,
-                               mounted=True, uptime_seconds=None)
+                               mounted=True)
         assert snap.stats_available is True
         assert snap.health is Health.OK
 
-    def test_rc_configured_but_unreachable_has_no_stats_and_is_degraded(self):
-        snap = build_snapshot(MOUNT, core=None, vfs=None, about=None,
-                               mounted=True, uptime_seconds=None)
-        assert snap.stats_available is False
-        assert snap.health is Health.DEGRADED
-
     def test_unmounted_is_down(self):
         snap = build_snapshot(MOUNT, core=None, vfs=None, about=None,
-                               mounted=False, uptime_seconds=None)
+                               mounted=False)
         assert snap.health is Health.DOWN
         assert snap.stats_available is False
 
     def test_unmounted_beats_a_missing_rc(self):
         snap = build_snapshot(NO_RC_MOUNT, core=None, vfs=None, about=None,
-                               mounted=False, uptime_seconds=None)
+                               mounted=False)
         assert snap.health is Health.DOWN
 
     def test_never_raises_on_empty_payloads(self):
         snap = build_snapshot(MOUNT, core={}, vfs={}, about={},
-                               mounted=True, uptime_seconds=None)
+                               mounted=True)
         assert isinstance(snap, MountSnapshot)
         assert snap.transfers == []
 
@@ -168,7 +163,7 @@ class TestHealth:
 class TestNoRcSummary:
     def test_summary_names_the_missing_flag(self):
         snap = build_snapshot(NO_RC_MOUNT, core=None, vfs=None, about=None,
-                               mounted=True, uptime_seconds=None)
+                               mounted=True)
         assert "--rc" in snap.summary
 
 
@@ -203,11 +198,45 @@ class TestCacheAndQuota:
     def test_missing_quota_is_none_not_zero(self, idle):
         snap = build_snapshot(
             MOUNT, core=load("core_stats_idle"), vfs=load("vfs_stats_idle"), about=None,
-            mounted=True, uptime_seconds=5,
+            mounted=True,
         )
         # None means "not yet polled"; zero would wrongly render an empty bar.
         assert snap.quota_used is None
         assert snap.quota_fraction is None
+
+
+class TestQuotaThrottle:
+    def test_a_failing_about_call_is_still_throttled(self, monkeypatch):
+        # Before the fix, a failed operations/about never updated _quota_at,
+        # so it was retried on every single _quota_now() call -- forever, for
+        # backends with no About and for every tick while offline.
+        calls = []
+
+        def failing_rc(rc_addr, endpoint, payload=None):
+            if endpoint == "operations/about":
+                calls.append(1)
+            return None
+
+        monkeypatch.setattr(probe, "_rc", failing_rc)
+        p = Probe(MOUNT)
+        for _ in range(5):
+            p._quota_now()
+        assert len(calls) == 1
+
+    def test_a_successful_about_call_is_reused_until_ttl(self, monkeypatch):
+        calls = []
+
+        def succeeding_rc(rc_addr, endpoint, payload=None):
+            if endpoint == "operations/about":
+                calls.append(1)
+                return {"used": 1, "total": 2}
+            return None
+
+        monkeypatch.setattr(probe, "_rc", succeeding_rc)
+        p = Probe(MOUNT)
+        for _ in range(5):
+            assert p._quota_now() == {"used": 1, "total": 2}
+        assert len(calls) == 1
 
 
 class TestAggregateSpeed:
@@ -267,7 +296,7 @@ class TestSummaryLine:
     def test_summarises_down(self):
         snap = build_snapshot(
             MOUNT, core=None, vfs=None, about=None,
-            mounted=False, uptime_seconds=None,
+            mounted=False,
         )
         assert snap.summary == "Not mounted"
 
@@ -276,6 +305,6 @@ class TestSummaryLine:
         vfs["diskCache"]["uploadsQueued"] = 4
         snap = build_snapshot(
             MOUNT, core=load("core_stats_uploading"), vfs=vfs, about=load("about"),
-            mounted=True, uptime_seconds=5,
+            mounted=True,
         )
         assert "4 queued" in snap.summary

@@ -1,4 +1,4 @@
-"""Reads an rclone mount's state from its rc API and systemd.
+"""Reads an rclone mount's state from its rc API and the filesystem.
 
 Pure data layer: no GUI imports, so both the GTK3 tray and the GTK4 window
 can share it. Every public entry point degrades to a usable MountSnapshot
@@ -11,7 +11,6 @@ from __future__ import annotations
 import enum
 import json
 import os
-import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -19,11 +18,11 @@ from dataclasses import dataclass, field
 
 from rcstatus.discovery import Mount
 
-# The rc API is loopback-only and started with --rc-no-auth, so a short
-# timeout is enough; anything slower means the mount is wedged.
+# The rc API is loopback-only, typically started with --rc-no-auth, so a
+# short timeout is enough; anything slower means the mount is wedged.
 RC_TIMEOUT = 2.0
-# operations/about is a live call to Microsoft, unlike the local stats
-# endpoints. Poll it sparingly to stay clear of API rate limits.
+# operations/about is a live call to the storage provider, unlike the local
+# stats endpoints. Poll it sparingly to stay clear of API rate limits.
 QUOTA_TTL = 60.0
 
 
@@ -62,7 +61,7 @@ def format_duration(seconds) -> str:
 
 @dataclass
 class Transfer:
-    """One file currently moving between the local cache and OneDrive."""
+    """One file currently moving between the local cache and the remote."""
 
     name: str
     path: str
@@ -99,7 +98,6 @@ class MountSnapshot:
     cache_files: int = 0
     quota_used: int | None = None
     quota_total: int | None = None
-    uptime_seconds: int | None = None
     mounted: bool = False
     taken_at: float = field(default_factory=time.time)
 
@@ -153,7 +151,7 @@ class MountSnapshot:
         return " · ".join(parts)
 
 
-def build_snapshot(mount, core, vfs, about, mounted, uptime_seconds) -> MountSnapshot:
+def build_snapshot(mount, core, vfs, about, mounted) -> MountSnapshot:
     """Assemble a MountSnapshot. core/vfs/about may each be None."""
     # Capture this BEFORE the coercion below: once `core` is {} there is no way
     # to tell "the rc API could not be reached" from "the rc API answered with
@@ -216,7 +214,6 @@ def build_snapshot(mount, core, vfs, about, mounted, uptime_seconds) -> MountSna
         cache_files=int(disk.get("files") or 0),
         quota_used=quota_used,
         quota_total=quota_total,
-        uptime_seconds=uptime_seconds,
         mounted=mounted,
     )
 
@@ -239,59 +236,43 @@ def _rc(rc_addr, endpoint: str, payload: dict | None = None):
         return None
 
 
-def _unit_uptime(unit, user_unit) -> int | None:
-    """Seconds since the owning unit started, or None."""
-    if not unit:
-        return None
-    scope = "--user" if user_unit else "--system"
-    try:
-        out = subprocess.run(
-            ["systemctl", scope, "show", unit,
-             "--property=ActiveState", "--property=ActiveEnterTimestampMonotonic"],
-            capture_output=True, text=True, timeout=3,
-        ).stdout
-    except (OSError, subprocess.SubprocessError):
-        return None
-
-    props = dict(l.split("=", 1) for l in out.strip().splitlines() if "=" in l)
-    if props.get("ActiveState") != "active":
-        return None
-    started = props.get("ActiveEnterTimestampMonotonic")
-    if not (started and started.isdigit() and int(started) > 0):
-        return None
-    # CLOCK_MONOTONIC microseconds, matching the kernel's own clock.
-    return max(0, int(time.clock_gettime(time.CLOCK_MONOTONIC) - int(started) / 1e6))
-
-
 class Probe:
     """Polls one mount, caching that mount's expensive quota call."""
 
     def __init__(self, mount: Mount):
         self.mount = mount
         self._quota = None
-        self._quota_at = 0.0
+        self._quota_at = float("-inf")
 
     def _quota_now(self):
-        age = time.time() - self._quota_at
-        if self._quota is None or age > QUOTA_TTL:
+        # The throttle is purely time-based: record the attempt whether it
+        # succeeds or fails. A backend with no About, or an offline mount,
+        # must not be retried every poll -- that blocks up to RC_TIMEOUT on
+        # every single tick, forever. The last good quota (or None) is kept
+        # until the next attempt is due.
+        age = time.monotonic() - self._quota_at
+        if age > QUOTA_TTL:
+            self._quota_at = time.monotonic()
             fresh = _rc(self.mount.rc_addr, "operations/about",
                         {"fs": self.mount.remote})
             if fresh is not None:
                 self._quota = fresh
-                self._quota_at = time.time()
         return self._quota
 
     def poll(self) -> MountSnapshot:
         mount = self.mount
         mounted = os.path.ismount(mount.mountpoint)
-        uptime = _unit_uptime(mount.unit, mount.user_unit)
 
         if not mounted:
             # Drop the cached quota so a restart cannot show stale figures.
             self._quota = None
-            return build_snapshot(mount, None, None, None, mounted, uptime)
+            return build_snapshot(mount, None, None, None, mounted)
+
+        if not mount.has_stats:
+            # No --rc: there is no rc API to ask, so don't even try.
+            return build_snapshot(mount, None, None, None, mounted)
 
         core = _rc(mount.rc_addr, "core/stats")
         vfs = _rc(mount.rc_addr, "vfs/stats")
         about = self._quota_now() if core is not None else None
-        return build_snapshot(mount, core, vfs, about, mounted, uptime)
+        return build_snapshot(mount, core, vfs, about, mounted)
