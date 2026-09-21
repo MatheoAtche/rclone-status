@@ -26,7 +26,7 @@ What matters instead, and what this app displays, per mount:
 | Uploads in progress and queued, cache errors | `vfs/stats` |
 | Local cache usage against `--vfs-cache-max-size` | `vfs/stats` |
 | Remote space used and total | `operations/about` |
-| Mount health and uptime | `systemctl` + `os.path.ismount` |
+| Mount health | `os.path.ismount` + rc reachability + errors |
 
 The window shows one expandable card per mount — collapsed to a one-line
 summary, expanded to the full detail above. The tray shows a single icon for
@@ -34,13 +34,17 @@ the whole machine: whichever mount is in the worst state decides what the
 icon and tooltip show, so a failing mount is never hidden behind healthy
 ones.
 
-Health resolves to one of four states:
+Health resolves to one of four states, from `mounted`, `stats_available`/
+`Mount.has_stats`, and any reported errors — never from systemd unit state:
 
-- **ok** — unit active, mount present, no errors
-- **error** — transfer errors, cache errors, or the cache is out of space
-- **degraded** — mounted and running, but the rc API is unreachable
-- **down** — the unit is dead, *or* the FUSE mount vanished while the unit
-  still reports active (this happens, and it is just as unusable)
+- **ok** — the FUSE mount is present, and either its rc API answered with no
+  errors, or it has no `--rc` configured at all (a deliberate choice)
+- **error** — the rc API answered, but reported transfer errors, cache
+  errors, or an out-of-space cache
+- **degraded** — the FUSE mount is present, but a configured rc port did not
+  answer
+- **down** — `os.path.ismount` says the FUSE mount is gone, whatever systemd
+  may still claim (this happens, and it is just as unusable)
 
 ### Mounts without `--rc`
 
@@ -56,17 +60,19 @@ To get stats, add `--rc --rc-addr=127.0.0.1:PORT --rc-no-auth` to the
 mount's own command line (see `data/rclone-mount.service.example`). Running
 several mounts needs a distinct port per mount; discovery reads whatever
 port each mount's own process was started with, so they never need to agree
-on one.
+on one. A `--rc-addr=unix://…` socket is not supported: discovery recognises
+it but reports no stats for that mount, the same as having no `--rc` at all.
 
 ## Install
 
 ```bash
-./install.sh            # app launcher + tray autostart
+./install.sh            # app launcher + tray systemd user unit, started at login
 ./install.sh --no-tray  # window only
 ```
 
-This adds a launcher to the app grid and an autostart entry for the tray. It
-also enables the `appindicatorsupport` GNOME extension if it is installed but
+This adds a launcher to the app grid and a systemd user unit for the tray
+(see "Turning the tray on and off" below — it is not an XDG autostart entry).
+It also enables the `appindicatorsupport` GNOME extension if it is installed but
 off — without it GNOME provides no `StatusNotifierWatcher`, and the tray icon
 silently never appears.
 
@@ -120,13 +126,17 @@ process cannot load GTK 3 and GTK 4 together — importing both raises
 loaded`. The tray therefore launches the window as a subprocess when asked to
 open it. Both import `poller.MultiProbe`, and either runs standalone.
 
-**Discovery and polling cadence.** Mounts are rediscovered every 10s —
-walking `/proc` and matching processes to `/proc/mounts` entries is far more
-expensive than a stats call, and mounts change rarely. Rediscovery also
-happens sooner, but no more often than that same 10s floor, whenever a mount
-stops answering: it may have restarted under a new pid or rc port, and
-without the floor a merely-unreachable mount would make every tick re-walk
-`/proc` and re-poll every other mount too. Transfer and cache stats
+**Discovery and polling cadence.** Mounts are rediscovered every 10s, and at
+no other time — walking `/proc` and matching processes to `/proc/mounts`
+entries is far more expensive than a stats call, and mounts change rarely.
+An earlier version also re-ran discovery immediately whenever a mount's rc
+call failed, on the theory that it had restarted under a new pid; that path
+was removed because it could never actually fire without either causing a
+poll storm (rediscovering and re-polling every other mount on every tick of
+an unreachable mount) or being bounded by the same 10s floor as ordinary
+discovery, at which point it did nothing the floor wasn't already doing. A
+mount that restarts is picked up within that same 10s, which is an
+acceptable recovery time. Transfer and cache stats
 (`core/stats`, `vfs/stats`) poll every 2s per mount; they are loopback calls
 and effectively free. `operations/about` (remote quota) is cached for 60s
 per mount, because unlike the other two it is a live call to the storage

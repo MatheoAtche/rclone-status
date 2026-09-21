@@ -110,7 +110,7 @@ class TestInstalledEntries:
 
 
 class TestSingleInstance:
-    """Only one tray may run: two icons for one mount is a confusing bug,
+    """Only one tray may run: two icons for one machine is a confusing bug,
     and the enable/disable toggle makes it easy to trigger."""
 
     def test_second_instance_exits_instead_of_duplicating(self, tmp_path):
