@@ -19,8 +19,8 @@ from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from odstatus import service  # noqa: E402
-from odstatus.probe import (  # noqa: E402
+from rcstatus import service  # noqa: E402
+from rcstatus.probe import (  # noqa: E402
     MOUNTPOINT,
     UNIT,
     Health,
@@ -134,7 +134,7 @@ class MeterRow(Gtk.Box):
 
 class StatusWindow(Adw.ApplicationWindow):
     def __init__(self, app):
-        super().__init__(application=app, title="OneDrive Status")
+        super().__init__(application=app, title="Rclone Status")
         self.set_default_size(460, 740)
         self.probe = Probe()
         self.rows: dict[str, TransferRow] = {}
@@ -361,7 +361,7 @@ class StatusWindow(Adw.ApplicationWindow):
 
 class StatusApp(Adw.Application):
     def __init__(self):
-        super().__init__(application_id="dev.matheoatche.OneDriveStatus")
+        super().__init__(application_id="dev.matheoatche.RcloneStatus")
 
     def do_activate(self):
         window = self.props.active_window or StatusWindow(self)

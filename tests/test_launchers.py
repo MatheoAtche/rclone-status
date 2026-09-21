@@ -1,6 +1,6 @@
 """The launcher scripts must work from any working directory.
 
-Regression test: the scripts originally ran `python3 -m odstatus.window`
+Regression test: the scripts originally ran `python3 -m rcstatus.window`
 with no PYTHONPATH, which only worked when the caller happened to be inside
 the repo. Launched from $HOME or by the desktop entry, they died with
 ModuleNotFoundError.
@@ -15,7 +15,7 @@ import subprocess
 import pytest
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
-LAUNCHERS = ["onedrive-status", "onedrive-status-tray"]
+LAUNCHERS = ["rclone-status", "rclone-status-tray"]
 
 
 def isolated_env(runtime_dir):
@@ -82,7 +82,7 @@ class TestInstalledEntries:
 
     def test_app_desktop_exec_is_executable(self):
         path = pathlib.Path(os.path.expanduser(
-            "~/.local/share/applications/dev.matheoatche.OneDriveStatus.desktop"))
+            "~/.local/share/applications/dev.matheoatche.RcloneStatus.desktop"))
         if not path.exists():
             pytest.skip(f"{path} not installed")
         parser = configparser.ConfigParser(interpolation=None)
@@ -93,7 +93,7 @@ class TestInstalledEntries:
 
     def test_tray_unit_execstart_is_executable(self):
         path = pathlib.Path(os.path.expanduser(
-            "~/.config/systemd/user/onedrive-status-tray.service"))
+            "~/.config/systemd/user/rclone-status-tray.service"))
         if not path.exists():
             pytest.skip(f"{path} not installed")
         line = next(l for l in path.read_text().splitlines()
@@ -105,7 +105,7 @@ class TestInstalledEntries:
     def test_old_autostart_entry_is_gone(self):
         # It would start a second tray beside the unit.
         stale = pathlib.Path(os.path.expanduser(
-            "~/.config/autostart/onedrive-status-tray.desktop"))
+            "~/.config/autostart/rclone-status-tray.desktop"))
         assert not stale.exists(), f"stale autostart entry: {stale}"
 
 
@@ -116,7 +116,7 @@ class TestSingleInstance:
     def test_second_instance_exits_instead_of_duplicating(self, tmp_path):
         env = isolated_env(tmp_path)
         first = subprocess.Popen(
-            [str(REPO / "bin" / "onedrive-status-tray")], env=env,
+            [str(REPO / "bin" / "rclone-status-tray")], env=env,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, start_new_session=True,
         )
@@ -126,7 +126,7 @@ class TestSingleInstance:
             assert first.poll() is None, "first instance died unexpectedly"
 
             second = subprocess.run(
-                [str(REPO / "bin" / "onedrive-status-tray")], env=env,
+                [str(REPO / "bin" / "rclone-status-tray")], env=env,
                 capture_output=True, text=True, timeout=15,
             )
             assert second.returncode == 0, second.stdout + second.stderr
@@ -139,7 +139,7 @@ class TestSingleInstance:
         env = isolated_env(tmp_path)
         for attempt in range(2):
             code, out = run_briefly(
-                [str(REPO / "bin" / "onedrive-status-tray")], env=env
+                [str(REPO / "bin" / "rclone-status-tray")], env=env
             )
             assert "already running" not in out.lower(), f"attempt {attempt}: {out}"
             assert code is None, f"attempt {attempt} exited early: {out}"

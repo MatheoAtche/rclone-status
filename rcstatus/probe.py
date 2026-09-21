@@ -17,10 +17,10 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 
-RC_ADDR = os.environ.get("ODSTATUS_RC_ADDR", "127.0.0.1:5572")
-UNIT = os.environ.get("ODSTATUS_UNIT", "rclone-onedrive.service")
-MOUNTPOINT = os.environ.get("ODSTATUS_MOUNT", os.path.expanduser("~/OneDrive"))
-REMOTE = os.environ.get("ODSTATUS_REMOTE", "onedrive:")
+RC_ADDR = os.environ.get("RCSTATUS_RC_ADDR", "127.0.0.1:5572")
+UNIT = os.environ.get("RCSTATUS_UNIT", "rclone-onedrive.service")
+MOUNTPOINT = os.environ.get("RCSTATUS_MOUNT", os.path.expanduser("~/OneDrive"))
+REMOTE = os.environ.get("RCSTATUS_REMOTE", "onedrive:")
 
 # The rc API is loopback-only and started with --rc-no-auth, so a short
 # timeout is enough; anything slower means the mount is wedged.

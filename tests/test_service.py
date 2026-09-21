@@ -10,7 +10,7 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from odstatus import service
+from rcstatus import service
 
 
 @pytest.fixture
@@ -148,23 +148,23 @@ class TestUnitInstall:
         monkeypatch.setattr(service, "unit_path", lambda: tmp_path / service.UNIT_NAME)
         template = tmp_path / "template.service"
         template.write_text(
-            "[Service]\nExecStart=/usr/local/bin/onedrive-status-tray\n"
+            "[Service]\nExecStart=/usr/local/bin/rclone-status-tray\n"
         )
         monkeypatch.setattr(service, "unit_template_path", lambda: template)
 
-        service.install_unit("/opt/app/bin/onedrive-status-tray")
+        service.install_unit("/opt/app/bin/rclone-status-tray")
 
         written = (tmp_path / service.UNIT_NAME).read_text()
-        assert "ExecStart=/opt/app/bin/onedrive-status-tray" in written
+        assert "ExecStart=/opt/app/bin/rclone-status-tray" in written
         assert "/usr/local/bin" not in written
 
     def test_reloads_the_daemon_after_writing(self, tmp_path, fake, monkeypatch):
         monkeypatch.setattr(service, "unit_path", lambda: tmp_path / service.UNIT_NAME)
         template = tmp_path / "template.service"
-        template.write_text("[Service]\nExecStart=/usr/local/bin/onedrive-status-tray\n")
+        template.write_text("[Service]\nExecStart=/usr/local/bin/rclone-status-tray\n")
         monkeypatch.setattr(service, "unit_template_path", lambda: template)
 
-        service.install_unit("/opt/app/bin/onedrive-status-tray")
+        service.install_unit("/opt/app/bin/rclone-status-tray")
         assert "daemon-reload" in fake.verbs()
 
 

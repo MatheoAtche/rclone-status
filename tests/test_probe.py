@@ -8,7 +8,7 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from odstatus.probe import (
+from rcstatus.probe import (
     Health,
     Snapshot,
     Transfer,

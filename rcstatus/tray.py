@@ -21,8 +21,8 @@ from gi.repository import AppIndicator3, GLib, Gtk  # noqa: E402
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from odstatus import service  # noqa: E402
-from odstatus.probe import (  # noqa: E402
+from rcstatus import service  # noqa: E402
+from rcstatus.probe import (  # noqa: E402
     MOUNTPOINT,
     UNIT,
     Health,
@@ -47,7 +47,7 @@ class Tray:
     def __init__(self):
         self.probe = Probe()
         self.indicator = AppIndicator3.Indicator.new(
-            "onedrive-status",
+            "rclone-status",
             ICONS[Health.OK],
             AppIndicator3.IndicatorCategory.SYSTEM_SERVICES,
         )
@@ -64,7 +64,7 @@ class Tray:
 
         self.menu.append(Gtk.SeparatorMenuItem())
 
-        open_window = Gtk.MenuItem(label="Open OneDrive Status")
+        open_window = Gtk.MenuItem(label="Open Rclone Status")
         open_window.connect("activate", self.open_window)
         self.menu.append(open_window)
 
@@ -101,13 +101,13 @@ class Tray:
 
     def open_window(self, *_):
         # PYTHONPATH rather than cwd: the tray may be started from anywhere,
-        # and a child inheriting the wrong cwd cannot import odstatus.
+        # and a child inheriting the wrong cwd cannot import rcstatus.
         repo = str(pathlib.Path(__file__).resolve().parents[1])
         env = dict(os.environ)
         env["PYTHONPATH"] = repo + (
             os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else ""
         )
-        subprocess.Popen([sys.executable, "-m", "odstatus.window"], cwd=repo, env=env)
+        subprocess.Popen([sys.executable, "-m", "rcstatus.window"], cwd=repo, env=env)
 
     def hide_tray(self, *_):
         """Turn the tray off for good, then exit under our own power.
@@ -166,10 +166,10 @@ def acquire_single_instance_lock():
     cannot leave the tray permanently unstartable.
     """
     global _LOCK_HANDLE
-    runtime = os.environ.get("XDG_RUNTIME_DIR") or f"/tmp/odstatus-{os.getuid()}"
+    runtime = os.environ.get("XDG_RUNTIME_DIR") or f"/tmp/rcstatus-{os.getuid()}"
     try:
         os.makedirs(runtime, exist_ok=True)
-        handle = open(os.path.join(runtime, "onedrive-status-tray.lock"), "w")
+        handle = open(os.path.join(runtime, "rclone-status-tray.lock"), "w")
         fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         return False
@@ -181,7 +181,7 @@ def acquire_single_instance_lock():
 
 def main():
     if not acquire_single_instance_lock():
-        print("OneDrive Status tray is already running.")
+        print("Rclone Status tray is already running.")
         return 0
     Tray()
     try:

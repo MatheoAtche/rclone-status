@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
-Name=OneDrive Status
+Name=Rclone Status
 Comment=View rclone OneDrive mount and upload status
-Exec=/usr/local/bin/onedrive-status
+Exec=/usr/local/bin/rclone-status
 Icon=folder-remote
 Terminal=false
 Categories=Utility;

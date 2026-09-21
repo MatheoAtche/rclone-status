@@ -15,7 +15,7 @@ import pathlib
 import subprocess
 from dataclasses import dataclass
 
-UNIT_NAME = "onedrive-status-tray.service"
+UNIT_NAME = "rclone-status-tray.service"
 
 # systemctl is-enabled words that mean "will start at login".
 ENABLED_WORDS = frozenset({"enabled", "enabled-runtime", "linked", "linked-runtime"})

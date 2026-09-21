@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Launch the OneDrive tray indicator.
+# Launch the OneDrive status window.
 # Resolves the repo from this script's own location so it works from any
 # directory, and through a symlink on PATH.
 set -euo pipefail
 REPO="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
-exec env PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}" python3 -m odstatus.tray "$@"
+exec env PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}" python3 -m rcstatus.window "$@"

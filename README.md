@@ -1,4 +1,4 @@
-# OneDrive Status
+# Rclone Status
 
 A GNOME status app for an rclone OneDrive mount — a tray indicator plus a
 GTK4 window showing what is uploading, how full the local cache is, and how
@@ -46,19 +46,19 @@ silently never appears.
 Start the window without logging out:
 
 ```bash
-./bin/onedrive-status
+./bin/rclone-status
 ```
 
 ## Turning the tray on and off
 
-The tray runs as the systemd user unit `onedrive-status-tray.service`, so
+The tray runs as the systemd user unit `rclone-status-tray.service`, so
 "is it running" and "does it start at login" have one authoritative answer.
 Toggle it from the **Tray icon** switch in the window, from **Hide Tray Icon**
 in the tray's own menu, or directly:
 
 ```bash
-systemctl --user enable --now onedrive-status-tray.service   # on
-systemctl --user disable --now onedrive-status-tray.service  # off
+systemctl --user enable --now rclone-status-tray.service   # on
+systemctl --user disable --now rclone-status-tray.service  # off
 ```
 
 The switch reads `is-enabled` and `is-active` rather than scanning the process
@@ -68,19 +68,19 @@ Only one tray may run at a time: it holds an `flock` in `$XDG_RUNTIME_DIR`, so
 a second launch exits quietly rather than adding a duplicate icon. The lock is
 released by the kernel when the process dies, so a crash cannot wedge it.
 
-Uninstall: delete `~/.local/share/applications/dev.matheoatche.OneDriveStatus.desktop`,
-then `systemctl --user disable --now onedrive-status-tray.service` and delete
-`~/.config/systemd/user/onedrive-status-tray.service`.
+Uninstall: delete `~/.local/share/applications/dev.matheoatche.RcloneStatus.desktop`,
+then `systemctl --user disable --now rclone-status-tray.service` and delete
+`~/.config/systemd/user/rclone-status-tray.service`.
 
 Versions before this used a `~/.config/autostart` entry for the tray;
 `install.sh` removes it on upgrade so the tray cannot be started twice.
 
 ## Layout
 
-    odstatus/probe.py   data layer: rc API + systemd -> Snapshot. No GUI imports.
-    odstatus/service.py tray unit lifecycle (enable/disable/state). No GUI imports.
-    odstatus/window.py  GTK4 + libadwaita window.
-    odstatus/tray.py    GTK3 + AppIndicator3 tray daemon.
+    rcstatus/probe.py   data layer: rc API + systemd -> Snapshot. No GUI imports.
+    rcstatus/service.py tray unit lifecycle (enable/disable/state). No GUI imports.
+    rcstatus/window.py  GTK4 + libadwaita window.
+    rcstatus/tray.py    GTK3 + AppIndicator3 tray daemon.
 
 **Why two processes.** `AppIndicator3` links against GTK3, and one Python
 process cannot load GTK 3 and GTK 4 together — importing both raises
@@ -103,10 +103,10 @@ Environment variables, all with working defaults:
 
 | Variable | Default |
 |---|---|
-| `ODSTATUS_RC_ADDR` | `127.0.0.1:5572` |
-| `ODSTATUS_UNIT` | `rclone-onedrive.service` |
-| `ODSTATUS_MOUNT` | `~/OneDrive` |
-| `ODSTATUS_REMOTE` | `onedrive:` |
+| `RCSTATUS_RC_ADDR` | `127.0.0.1:5572` |
+| `RCSTATUS_UNIT` | `rclone-onedrive.service` |
+| `RCSTATUS_MOUNT` | `~/OneDrive` |
+| `RCSTATUS_REMOTE` | `onedrive:` |
 
 The mount must run with `--rc --rc-addr=127.0.0.1:5572 --rc-no-auth`. A
 matching systemd user unit is included at `data/rclone-onedrive.service.example`.
