@@ -15,19 +15,13 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gio, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, GLib, Gtk  # noqa: E402
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from rcstatus import service  # noqa: E402
-from rcstatus.probe import (  # noqa: E402
-    MOUNTPOINT,
-    UNIT,
-    Health,
-    Probe,
-    format_bytes,
-    format_duration,
-)
+from rcstatus.poller import MultiProbe  # noqa: E402
+from rcstatus.probe import Health, format_bytes, format_duration  # noqa: E402
 
 POLL_SECONDS = 2
 
@@ -132,12 +126,117 @@ class MeterRow(Gtk.Box):
             self.bar.add_css_class("warning")
 
 
+class MountCard(Adw.ExpanderRow):
+    """One mount: summary when collapsed, full detail when expanded."""
+
+    def __init__(self, snapshot, window):
+        super().__init__()
+        self.window = window
+        self.rows = {}
+
+        self.icon = Gtk.Image(icon_name="object-select-symbolic", pixel_size=16)
+        self.add_prefix(self.icon)
+
+        self.transfers_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+        self.transfers_list.add_css_class("boxed-list")
+        self.empty_label = Gtk.Label(label="No transfers in progress")
+        self.empty_label.add_css_class("dim-label")
+        self.empty_label.set_margin_top(12)
+        self.empty_label.set_margin_bottom(12)
+        self.stack = Gtk.Stack()
+        self.stack.add_named(self.empty_label, "empty")
+        self.stack.add_named(self.transfers_list, "list")
+
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        body.set_margin_top(6)
+        body.set_margin_bottom(12)
+        body.set_margin_start(12)
+        body.set_margin_end(12)
+        body.append(self.stack)
+
+        self.cache_meter = MeterRow("Local cache")
+        self.quota_meter = MeterRow("Remote")
+        body.append(self.cache_meter)
+        body.append(self.quota_meter)
+
+        self.actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        self.open_button = Gtk.Button(label="Open Folder")
+        self.open_button.connect(
+            "clicked",
+            lambda *_: subprocess.Popen(["xdg-open", self.mountpoint]),
+        )
+        self.restart_button = Gtk.Button(label="Restart Mount")
+        self.restart_button.connect("clicked", self._restart)
+        self.actions.append(self.open_button)
+        self.actions.append(self.restart_button)
+        body.append(self.actions)
+
+        row = Gtk.ListBoxRow(activatable=False, selectable=False)
+        row.set_child(body)
+        self.add_row(row)
+
+        self.update(snapshot)
+
+    def _restart(self, *_):
+        if self._unit and self._user_unit:
+            subprocess.Popen(["systemctl", "--user", "restart", self._unit])
+            self.window.banner.set_title("Restarting the mount…")
+            self.window.banner.set_revealed(True)
+
+    def update(self, snap):
+        mount = snap.mount
+        self.mountpoint = mount.mountpoint
+        self._unit = mount.unit
+        self._user_unit = mount.user_unit
+
+        self.set_title(mount.remote)
+        self.set_subtitle(f"{mount.mountpoint} · {snap.summary}")
+
+        icon, css, _ = HEALTH_PRESENTATION[snap.health]
+        if snap.health is Health.OK and snap.transfers:
+            icon = "network-transmit-symbolic"
+        self.icon.set_from_icon_name(icon)
+        for cls in ("success", "warning", "error"):
+            self.icon.remove_css_class(cls)
+        self.icon.add_css_class(css)
+
+        # A mount may legitimately offer no restart: only user units can be
+        # restarted without privilege we do not have.
+        self.restart_button.set_visible(mount.can_restart)
+
+        self._sync_transfers(snap)
+        self.cache_meter.update(
+            snap.cache_bytes, snap.cache_max_bytes, snap.cache_fraction,
+            suffix=f" · {snap.cache_files} files" if snap.cache_files else "",
+        )
+        self.quota_meter.update(snap.quota_used, snap.quota_total, snap.quota_fraction)
+
+        for meter in (self.cache_meter, self.quota_meter):
+            meter.set_visible(snap.stats_available)
+
+    def _sync_transfers(self, snap):
+        seen = set()
+        for t in snap.transfers:
+            seen.add(t.path)
+            row = self.rows.get(t.path)
+            if row is None:
+                row = TransferRow(t)
+                self.rows[t.path] = row
+                self.transfers_list.append(row)
+            else:
+                row.update(t)
+        for path in list(self.rows):
+            if path not in seen:
+                self.transfers_list.remove(self.rows.pop(path))
+        self.stack.set_visible_child_name("list" if self.rows else "empty")
+
+
 class StatusWindow(Adw.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app, title="Rclone Status")
         self.set_default_size(460, 740)
-        self.probe = Probe()
-        self.rows: dict[str, TransferRow] = {}
+        self.prober = MultiProbe()
+        self.cards = {}
 
         view = Adw.ToolbarView()
         header = Adw.HeaderBar()
@@ -146,11 +245,6 @@ class StatusWindow(Adw.ApplicationWindow):
         refresh.connect("clicked", lambda *_: self.refresh())
         header.pack_start(refresh)
 
-        menu = Gio.Menu()
-        menu.append("Open OneDrive Folder", "win.open-folder")
-        menu.append("Restart Mount", "win.restart")
-        menu_button = Gtk.MenuButton(icon_name="open-menu-symbolic", menu_model=menu)
-        header.pack_end(menu_button)
         view.add_top_bar(header)
 
         self.banner = Adw.Banner(revealed=False)
@@ -164,9 +258,19 @@ class StatusWindow(Adw.ApplicationWindow):
         content.set_margin_start(12)
         content.set_margin_end(12)
 
-        content.append(self._build_status_card())
-        content.append(self._build_transfers())
-        content.append(self._build_storage())
+        self.mounts_group = Adw.PreferencesGroup(title="Mounts")
+        self.mounts_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
+        self.mounts_list.add_css_class("boxed-list")
+        self.empty_page = Adw.StatusPage(
+            icon_name="folder-remote-symbolic",
+            title="No rclone mounts found",
+            description="Mount a remote with `rclone mount` and it will appear here.",
+        )
+        self.mounts_stack = Gtk.Stack()
+        self.mounts_stack.add_named(self.empty_page, "empty")
+        self.mounts_stack.add_named(self.mounts_list, "list")
+        self.mounts_group.add(self.mounts_stack)
+        content.append(self.mounts_group)
         content.append(self._build_tray_toggle())
 
         clamp.set_child(content)
@@ -174,69 +278,9 @@ class StatusWindow(Adw.ApplicationWindow):
         view.set_content(scroller)
         self.set_content(view)
 
-        self._install_actions()
         self._install_css()
         self.refresh()
         GLib.timeout_add_seconds(POLL_SECONDS, self._tick)
-
-    def _build_status_card(self):
-        group = Adw.PreferencesGroup()
-        card = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        card.set_margin_top(12)
-        card.set_margin_bottom(12)
-        card.set_margin_start(12)
-        card.set_margin_end(12)
-
-        self.status_icon = Gtk.Image(icon_name="object-select-symbolic", pixel_size=32)
-        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, hexpand=True)
-        self.status_title = Gtk.Label(xalign=0)
-        self.status_title.add_css_class("title-4")
-        self.status_subtitle = Gtk.Label(xalign=0, wrap=True)
-        self.status_subtitle.add_css_class("dim-label")
-        text.append(self.status_title)
-        text.append(self.status_subtitle)
-
-        card.append(self.status_icon)
-        card.append(text)
-
-        listbox = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
-        listbox.add_css_class("boxed-list")
-        row = Gtk.ListBoxRow(activatable=False, selectable=False)
-        row.set_child(card)
-        listbox.append(row)
-        group.add(listbox)
-        return group
-
-    def _build_transfers(self):
-        self.transfers_group = Adw.PreferencesGroup(title="Transfers")
-        self.transfers_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
-        self.transfers_list.add_css_class("boxed-list")
-
-        self.empty_label = Gtk.Label(label="No transfers in progress")
-        self.empty_label.add_css_class("dim-label")
-        self.empty_label.set_margin_top(24)
-        self.empty_label.set_margin_bottom(24)
-
-        self.transfers_stack = Gtk.Stack()
-        self.transfers_stack.add_named(self.empty_label, "empty")
-        self.transfers_stack.add_named(self.transfers_list, "list")
-        self.transfers_group.add(self.transfers_stack)
-        return self.transfers_group
-
-    def _build_storage(self):
-        group = Adw.PreferencesGroup(title="Storage")
-        listbox = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE)
-        listbox.add_css_class("boxed-list")
-
-        self.cache_meter = MeterRow("Local cache")
-        self.quota_meter = MeterRow("OneDrive")
-        for meter in (self.cache_meter, self.quota_meter):
-            row = Gtk.ListBoxRow(activatable=False, selectable=False)
-            row.set_child(meter)
-            listbox.append(row)
-
-        group.add(listbox)
-        return group
 
     def _build_tray_toggle(self):
         group = Adw.PreferencesGroup(title="Tray")
@@ -265,22 +309,6 @@ class StatusWindow(Adw.ApplicationWindow):
         # Re-read rather than trusting the switch: systemd is the truth.
         self._set_tray_row(service.state())
 
-    def _install_actions(self):
-        open_folder = Gio.SimpleAction.new("open-folder", None)
-        open_folder.connect(
-            "activate", lambda *_: subprocess.Popen(["xdg-open", MOUNTPOINT])
-        )
-        self.add_action(open_folder)
-
-        restart = Gio.SimpleAction.new("restart", None)
-        restart.connect("activate", lambda *_: self._restart_mount())
-        self.add_action(restart)
-
-    def _restart_mount(self):
-        subprocess.Popen(["systemctl", "--user", "restart", UNIT])
-        self.banner.set_title("Restarting the mount…")
-        self.banner.set_revealed(True)
-
     def _install_css(self):
         provider = Gtk.CssProvider()
         provider.load_from_data(CSS)
@@ -293,70 +321,38 @@ class StatusWindow(Adw.ApplicationWindow):
         return GLib.SOURCE_CONTINUE
 
     def refresh(self):
-        snap = self.probe.poll()
+        system = self.prober.poll()
 
-        icon, css, title = HEALTH_PRESENTATION[snap.health]
-        if snap.health is Health.OK and snap.transfers:
-            icon, title = "network-transmit-symbolic", "Uploading"
-        self.status_icon.set_from_icon_name(icon)
-        for cls in ("success", "warning", "error"):
-            self.status_icon.remove_css_class(cls)
-        self.status_icon.add_css_class(css)
-        self.status_title.set_text(title)
-
-        # The title already says "Uploading", so the subtitle drops that prefix.
-        if snap.transfers:
-            noun = "file" if len(snap.transfers) == 1 else "files"
-            parts = [
-                f"{len(snap.transfers)} {noun}",
-                f"{format_bytes(snap.total_speed_bps)}/s",
-                f"{format_duration(snap.overall_eta_seconds)} left",
-            ]
-        else:
-            parts = [snap.summary]
-        if snap.health is Health.OK and snap.uptime_seconds is not None:
-            parts.append(f"up {format_duration(snap.uptime_seconds)}")
-        self.status_subtitle.set_text(" · ".join(parts))
-
-        if snap.last_error:
-            self.banner.set_title(snap.last_error)
-            self.banner.set_revealed(True)
-        elif snap.health is not Health.DOWN:
-            self.banner.set_revealed(False)
-
-        self._sync_transfer_rows(snap)
-
-        self.cache_meter.update(
-            snap.cache_bytes, snap.cache_max_bytes, snap.cache_fraction,
-            suffix=f" · {snap.cache_files} files" if snap.cache_files else "",
-        )
-        self.quota_meter.update(snap.quota_used, snap.quota_total, snap.quota_fraction)
-
-        title = "Transfers"
-        if snap.uploads_queued:
-            title = f"Transfers · {snap.uploads_queued} queued"
-        self.transfers_group.set_title(title)
-
-        self._set_tray_row(service.state())
-
-    def _sync_transfer_rows(self, snap):
-        """Update rows in place; only add and remove what actually changed."""
         seen = set()
-        for transfer in snap.transfers:
-            seen.add(transfer.path)
-            row = self.rows.get(transfer.path)
-            if row is None:
-                row = TransferRow(transfer)
-                self.rows[transfer.path] = row
-                self.transfers_list.append(row)
+        created = []
+        for snap in system.mounts:
+            key = snap.mount.key
+            seen.add(key)
+            card = self.cards.get(key)
+            if card is None:
+                card = MountCard(snap, self)
+                self.cards[key] = card
+                self.mounts_list.append(card)
+                created.append(card)
             else:
-                row.update(transfer)
+                card.update(snap)
+        for key in list(self.cards):
+            if key not in seen:
+                self.mounts_list.remove(self.cards.pop(key))
 
-        for path in list(self.rows):
-            if path not in seen:
-                self.transfers_list.remove(self.rows.pop(path))
+        # Expand a lone mount when its card first appears, so a one-mount
+        # machine looks as it did before multi-mount support. Only on
+        # creation -- doing it every refresh would fight a user trying to
+        # collapse it.
+        if len(self.cards) == 1 and created:
+            created[0].set_expanded(True)
 
-        self.transfers_stack.set_visible_child_name("list" if self.rows else "empty")
+        self.mounts_stack.set_visible_child_name("list" if self.cards else "empty")
+        self.mounts_group.set_title(
+            "Mounts" if len(self.cards) != 1 else "Mount"
+        )
+        self.set_title(f"Rclone Status — {system.summary}")
+        self._set_tray_row(service.state())
 
 
 class StatusApp(Adw.Application):
