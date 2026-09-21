@@ -22,14 +22,8 @@ from gi.repository import AppIndicator3, GLib, Gtk  # noqa: E402
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from rcstatus import service  # noqa: E402
-from rcstatus.probe import (  # noqa: E402
-    MOUNTPOINT,
-    UNIT,
-    Health,
-    Probe,
-    format_bytes,
-    format_duration,
-)
+from rcstatus.poller import MultiProbe  # noqa: E402
+from rcstatus.probe import Health  # noqa: E402
 
 POLL_SECONDS = 2
 
@@ -45,7 +39,7 @@ UPLOADING_ICON = "network-transmit-symbolic"
 
 class Tray:
     def __init__(self):
-        self.probe = Probe()
+        self.prober = MultiProbe()
         self.indicator = AppIndicator3.Indicator.new(
             "rclone-status",
             ICONS[Health.OK],
@@ -58,28 +52,15 @@ class Tray:
         self.summary_item.set_sensitive(False)
         self.menu.append(self.summary_item)
 
-        self.detail_item = Gtk.MenuItem(label="")
-        self.detail_item.set_sensitive(False)
-        self.menu.append(self.detail_item)
+        self.mount_separator = Gtk.SeparatorMenuItem()
+        self.menu.append(self.mount_separator)
 
-        self.menu.append(Gtk.SeparatorMenuItem())
+        # Per-mount rows are rebuilt on change; this tracks what we added.
+        self.mount_items = {}
 
         open_window = Gtk.MenuItem(label="Open Rclone Status")
         open_window.connect("activate", self.open_window)
         self.menu.append(open_window)
-
-        open_folder = Gtk.MenuItem(label="Open OneDrive Folder")
-        open_folder.connect(
-            "activate", lambda *_: subprocess.Popen(["xdg-open", MOUNTPOINT])
-        )
-        self.menu.append(open_folder)
-
-        restart = Gtk.MenuItem(label="Restart Mount")
-        restart.connect(
-            "activate",
-            lambda *_: subprocess.Popen(["systemctl", "--user", "restart", UNIT]),
-        )
-        self.menu.append(restart)
 
         self.menu.append(Gtk.SeparatorMenuItem())
 
@@ -119,38 +100,49 @@ class Tray:
         Gtk.main_quit()
 
     def refresh(self):
-        snap = self.probe.poll()
+        system = self.prober.poll()
 
-        icon = ICONS[snap.health]
-        if snap.health is Health.OK and snap.transfers:
+        icon = ICONS[system.worst_health]
+        if system.worst_health is Health.OK and system.total_transfers:
             icon = UPLOADING_ICON
-        self.indicator.set_icon_full(icon, snap.summary)
+        self.indicator.set_icon_full(icon, system.summary)
 
         # The label sits next to the icon in the top bar; keep it short and
         # show it only while something is actually moving.
-        if snap.transfers:
-            self.indicator.set_label(f"{len(snap.transfers)}↑", "99↑")
+        if system.total_transfers:
+            self.indicator.set_label(f"{system.total_transfers}↑", "99↑")
         else:
             self.indicator.set_label("", "")
 
-        self.summary_item.set_label(snap.summary)
-
-        if snap.transfers:
-            detail = "  ·  ".join(
-                f"{t.name[:28]} {t.percent}%" for t in snap.transfers[:3]
-            )
-            if snap.overall_eta_seconds is not None:
-                detail += f"  ·  {format_duration(snap.overall_eta_seconds)} left"
-        elif snap.health is Health.DOWN:
-            detail = "systemctl --user start " + UNIT
-        else:
-            cache = format_bytes(snap.cache_bytes)
-            quota = format_bytes(snap.quota_used)
-            detail = f"Cache {cache}  ·  OneDrive {quota} used"
-
-        self.detail_item.set_label(detail)
-        self.indicator.set_title(f"OneDrive — {snap.summary}")
+        self.summary_item.set_label(system.summary)
+        self._sync_mount_items(system)
+        self.indicator.set_title(f"Rclone — {system.summary}")
         return GLib.SOURCE_CONTINUE
+
+    def _sync_mount_items(self, system):
+        """One disabled menu row per mount, in discovery order."""
+        wanted = {}
+        for snap in system.mounts:
+            marker = {
+                Health.OK: "●", Health.DEGRADED: "⚠",
+                Health.ERROR: "⚠", Health.DOWN: "✕",
+            }[snap.health]
+            wanted[snap.mount.key] = f"{marker} {snap.mount.remote}  {snap.summary}"
+
+        for key, label in wanted.items():
+            item = self.mount_items.get(key)
+            if item is None:
+                item = Gtk.MenuItem(label=label)
+                item.set_sensitive(False)
+                self.mount_items[key] = item
+                self.menu.insert(item, len(self.mount_items))
+                item.show()
+            else:
+                item.set_label(label)
+
+        for key in list(self.mount_items):
+            if key not in wanted:
+                self.menu.remove(self.mount_items.pop(key))
 
 
 # Held for the process lifetime; releasing it would let a second tray start.
